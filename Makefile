@@ -1,59 +1,69 @@
-# -------- settings --------
-IMG              ?= trivy-dashboard:ubi9
-NAME             ?= trivy-dashboard
-PORT             ?= 8080
-REPORTS_DIR      ?= /srv/trivy/reports           # host path where your JSON folders live
-CONTEXT          ?= .
-CONTAINERFILE    ?= Containerfile.ubi9
+# ===== Trivy Dashboard (UBI9 Nginx) =====
+IMAGE       ?= trivy-dashboard:ubi9
+DOCKERFILE  ?= Dockerfile
+CONTAINER   ?= trivy-dashboard
+HOST_PORT   ?= 8080
 
-# add :z on SELinux hosts (kept by default)
-VOLUME_OPTS      ?= -v $(REPORTS_DIR):/data/reports:ro,z
+# Change this to wherever your reports live on the host.
+# The container serves them at http://localhost:8080/reports/
+HOST_REPORTS ?= /srv/trivy/reports
 
-# -------- targets --------
-.PHONY: all build run stop rm logs reload ps systemd-install systemd-remove
+# Use :Z for SELinux hosts (OK on non-SELinux too).
+VOLUME_FLAGS = -v $(HOST_REPORTS):/usr/share/nginx/html/reports:ro,Z
 
-all: build run
+.PHONY: help build rebuild run up stop rm logs sh ps open inspect clean
+
+help:
+	@echo "Targets:"
+	@echo "  make build     - Build $(IMAGE) using $(DOCKERFILE)"
+	@echo "  make rebuild   - Rebuild without cache"
+	@echo "  make run/up    - Run container on port $(HOST_PORT), mount $(HOST_REPORTS) -> /reports"
+	@echo "  make stop      - Stop container"
+	@echo "  make rm        - Remove container"
+	@echo "  make logs      - Tail logs"
+	@echo "  make sh        - Shell into running container"
+	@echo "  make ps        - Show container status"
+	@echo "  make open      - Print URL to open"
+	@echo "  make inspect   - Print effective config"
+	@echo "  make clean     - Stop & remove container"
 
 build:
-	@echo ">>> Building $(IMG)"
-	podman build -t $(IMG) -f $(CONTAINERFILE) $(CONTEXT)
+	podman build -t $(IMAGE) -f $(DOCKERFILE) .
 
-run:
-	@echo ">>> Starting $(NAME) on :$(PORT)"
-	podman run -d --name $(NAME) \
-		-p $(PORT):8080 \
-		$(VOLUME_OPTS) \
-		--read-only \
-		--security-opt no-new-privileges=true \
-		localhost/$(IMG)
+rebuild:
+	podman build --no-cache -t $(IMAGE) -f $(DOCKERFILE) .
+
+run up: stop rm
+	podman run -d --name $(CONTAINER) \
+		-p $(HOST_PORT):8080 \
+		$(VOLUME_FLAGS) \
+		$(IMAGE)
+	@echo "Serving on http://localhost:$(HOST_PORT)  (reports at /reports)"
 
 stop:
-	- podman stop $(NAME)
+	-@podman stop $(CONTAINER) >/dev/null 2>&1 || true
 
-rm: stop
-	- podman rm $(NAME)
+rm:
+	-@podman rm $(CONTAINER)   >/dev/null 2>&1 || true
 
 logs:
-	podman logs -f $(NAME)
+	podman logs -f $(CONTAINER)
 
-reload:
-	# Rebuild and replace the container without changing data volume
-	$(MAKE) build
-	- podman rm -f $(NAME)
-	$(MAKE) run
+sh:
+	podman exec -it $(CONTAINER) /bin/bash
 
 ps:
-	podman ps --format "table {{.Names}}\t{{.Image}}\t{{.Ports}}\t{{.Status}}"
+	podman ps --filter "name=$(CONTAINER)"
 
-systemd-install:
-	@echo ">>> Installing systemd unit for $(NAME)"
-	podman generate systemd --new --name $(NAME) --files --restart-policy=always
-	sudo mv container-$(NAME).service /etc/systemd/system/$(NAME).service
-	sudo systemctl daemon-reload
-	sudo systemctl enable --now $(NAME)
-	@echo ">>> Installed: systemctl status $(NAME)"
+open:
+	@echo "Open: http://localhost:$(HOST_PORT)"
 
-systemd-remove:
-	- sudo systemctl disable --now $(NAME)
-	- sudo rm -f /etc/systemd/system/$(NAME).service
-	- sudo systemctl daemon-reload
+inspect:
+	@echo "IMAGE       = $(IMAGE)"
+	@echo "DOCKERFILE  = $(DOCKERFILE)"
+	@echo "CONTAINER   = $(CONTAINER)"
+	@echo "HOST_PORT   = $(HOST_PORT)"
+	@echo "HOST_REPORTS= $(HOST_REPORTS)"
+
+clean: stop rm
+

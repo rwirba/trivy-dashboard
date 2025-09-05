@@ -3,9 +3,9 @@ FROM registry.access.redhat.com/ubi9/ubi
 RUN dnf -y install httpd && dnf clean all
 
 # non-root + dirs
-RUN useradd -u 10001 web && \
+RUN useradd -u 10001 nobody && \
     mkdir -p /var/www/html /data/reports && \
-    chown -R web:web /var/www/html /data/reports
+    chown -R nobody:nobody /var/www/html /data/reports
 
 # app files
 COPY --chown=web:web dashboard.html /var/www/html/
