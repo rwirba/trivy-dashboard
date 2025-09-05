@@ -1,0 +1,728 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Trivy Reports: Weekly Dashboard + Vulnerabilities & SBOM Viewer</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<style>
+:root{--fg:#111;--muted:#666;--line:#e7e7e7;--bg:#fff}
+*{box-sizing:border-box} body{margin:24px;color:var(--fg);font:15px/1.45 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Arial;background:var(--bg)}
+h1{margin:0 0 .25rem} h2{margin:1rem 0 .25rem} .muted{color:var(--muted)} a{color:#0a58ca;text-decoration:none}
+.card{border:1px solid var(--line);border-radius:12px;padding:16px;margin:16px 0;box-shadow:0 1px 1px rgba(0,0,0,.03)}
+.row{display:flex;gap:16px;flex-wrap:wrap} .col{flex:1 1 420px}
+table{width:100%;border-collapse:collapse;margin-top:8px} th,td{padding:8px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+th{cursor:default}
+.badge{display:inline-block;min-width:2.2rem;padding:.1rem .45rem;border-radius:999px;font-size:.85rem;text-align:center}
+.CRITICAL{background:#fee;color:#900}.HIGH{background:#fff0f0;color:#b00}.MEDIUM{background:#fff7e6;color:#a65}.LOW{background:#eef8ff;color:#05a}.UNKNOWN{background:#eee;color:#555}
+canvas{width:100%;height:280px;border:1px solid var(--line);border-radius:10px;background:#fff}
+.actions{display:flex;gap:10px;flex-wrap:wrap;margin:10px 0}
+.btn{padding:8px 12px;border:1px solid var(--line);border-radius:8px;background:#f7f7f7;cursor:pointer}
+.drop{border:2px dashed #aaa;padding:16px;border-radius:10px;text-align:center;color:#555}
+small.code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;background:#f7f7f7;padding:2px 6px;border-radius:6px}
+.controls{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+.chk{display:inline-flex;gap:6px;align-items:center;padding:6px 8px;border:1px solid var(--line);border-radius:8px;background:#f7f7f7}
+.notice{margin:.5rem 0;color:#555}
+hr{border:none;border-top:2px solid var(--line);margin:28px 0}
+/* --- server browser helper styles --- */
+.folder { padding:6px 8px; border:1px solid var(--line); border-radius:8px; margin:6px 0; }
+.folder h4 { margin:0 0 6px; font-size:14px; }
+.folder a { display:inline-block; margin:2px 6px 2px 0; }
+.tag { font:12px/1.2 ui-sans-serif; background:#f1f1f1; padding:2px 6px; border-radius:999px; border:1px solid var(--line); cursor:pointer; }
+.tag:hover { background:#e9e9e9; }
+</style>
+</head>
+<body>
+  <h1>Trivy Reports</h1>
+  <p class="muted">Pick your <code>reports/&lt;host&gt;/</code> folder (reads all <code>trivy-reports-YYYYmmdd-HHMMSS/*.json</code> and optional <code>sboms-YYYYmmdd-HHMMSS/*.json</code>) or drop JSON files/folders. The weekly widgets always use the newest folder (“latest week”).</p>
+
+  <div class="actions">
+    <button class="btn" id="pickdirBtn">📁 Pick reports folder</button>
+    <input id="pickdir" type="file" webkitdirectory directory multiple accept=".json" style="display:none">
+    <button class="btn" id="pickfilesBtn">🗂️ Pick files</button>
+    <input id="pickfiles" type="file" multiple accept=".json" style="display:none">
+    <button class="btn" id="dl-weekly" disabled>📥 weekly_summary.csv</button>
+    <button class="btn" id="dl-latest" disabled>📥 latest_week_per_image.csv</button>
+    <button class="btn" id="dl-vuls" disabled>📥 vulnerabilities_filtered.csv</button>
+  </div>
+
+  <!-- SERVER REPORTS BROWSER (lists /reports/<host>/* folders served by httpd autoindex) -->
+  <div class="card" id="server-browser">
+    <div style="display:flex;align-items:center;gap:10px;justify-content:space-between;flex-wrap:wrap">
+      <strong>Reports on server (<code>/reports</code>)</strong>
+      <div>
+        <button class="btn" id="refreshServerBtn">🔄 Refresh</button>
+        <span class="muted" id="serverStatus"></span>
+      </div>
+    </div>
+    <div id="serverList" style="margin-top:8px"></div>
+  </div>
+
+  <div id="drop" class="drop">Drop your <strong>reports/&lt;host&gt;/</strong> folder or *.json files here</div>
+
+  <!-- SECTION 1: WEEKLY DASHBOARD -->
+  <h2>Trivy Weekly Dashboard</h2>
+  <div class="row">
+    <div class="col card">
+      <h3>Weekly trend (total vulns across all images)</h3>
+      <canvas id="trend"></canvas>
+      <div class="muted" id="trend-note"></div>
+    </div>
+    <div class="col card">
+      <h3>Latest week — per image (stacked by severity)</h3>
+      <canvas id="bars"></canvas>
+      <div class="muted" id="bars-note"></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>Latest week — details</h3>
+    <div class="muted" id="latest-week-label"></div>
+    <table>
+      <thead>
+        <tr>
+          <th>Images</th>
+          <th>CRITICAL</th><th>HIGH</th><th>MEDIUM</th><th>LOW</th><th>UNKNOWN</th><th>Total</th>
+        </tr>
+      </thead>
+      <tbody id="latest-tbody"></tbody>
+    </table>
+  </div>
+
+  <hr>
+
+  <!-- SECTION 2: VULNERABILITIES VIEWER -->
+  <h2>Trivy Vulnerabilities Viewer</h2>
+  <div class="notice" id="scope-note"></div>
+  <div class="card controls">
+    <label class="chk"><input type="checkbox" class="sev" value="CRITICAL" checked> <span class="badge CRITICAL">CRITICAL</span></label>
+    <label class="chk"><input type="checkbox" class="sev" value="HIGH" checked> <span class="badge HIGH">HIGH</span></label>
+    <label class="chk"><input type="checkbox" class="sev" value="MEDIUM" checked> <span class="badge MEDIUM">MEDIUM</span></label>
+    <label class="chk"><input type="checkbox" class="sev" value="LOW" checked> <span class="badge LOW">LOW</span></label>
+    <label class="chk"><input type="checkbox" class="sev" value="UNKNOWN"> <span class="badge UNKNOWN">UNK</span></label>
+    <label class="chk"><input type="checkbox" id="fixonly"> Fix available only</label>
+    <label class="chk"><input type="checkbox" id="allweeks"> Show all weeks (aggregate)</label>
+    <input id="q" type="search" placeholder="Search (CVE, package, image, title) …">
+    <span id="counts" class="muted"></span>
+  </div>
+
+  <div class="card">
+    <table id="grid">
+      <thead>
+        <tr>
+          <th data-k="Severity">Severity</th>
+          <th data-k="Images">Images</th>
+          <th data-k="Pkg">Package</th>
+          <th data-k="Installed">Installed Version</th>
+          <th data-k="Fixed">Fixed Version</th>
+          <th data-k="CVE">CVE</th>
+          <th data-k="Title">Advisory / Title</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </div>
+
+  <hr>
+
+  <!-- SECTION 3: SBOM INVENTORY -->
+  <h2>SBOM Inventory</h2>
+  <div class="card controls">
+    <input id="sbom-q" type="search" placeholder="Search (image, package, version, license, purl) …">
+    <button class="btn" id="dl-sbom" disabled>📥 sbom_inventory.csv</button>
+  </div>
+
+  <div class="card">
+    <table id="sbom-grid">
+      <thead>
+        <tr>
+          <th>Image</th><th>Package</th><th>Version</th><th>PURL</th><th>Licenses</th>
+        </tr>
+      </thead>
+      <tbody id="sbom-tbody"></tbody>
+    </table>
+  </div>
+
+<script>
+/* ===== shared helpers & state ===== */
+const sevOrder = ["CRITICAL","HIGH","MEDIUM","LOW","UNKNOWN"];
+const sevColor = {CRITICAL:"#aa0000", HIGH:"#cc4444", MEDIUM:"#cc8a2f", LOW:"#2f74cc", UNKNOWN:"#777"};
+let ALL_ITEMS = [];   // [{file,name,path,json}]
+let WEEKS = [];       // [{date, items:[{file,path,json}]}]
+let WEEKLY_AGG = [];  // [{date, counts}]
+let LATEST = null;    // {date, items:[...]}
+let PER_IMAGE = [];   // latest week per-image rows
+let VUL_ROWS = [];    // rows used by the viewer (changes with toggle)
+let CURRENT_ROWS = []; // filtered rows
+
+// SBOM store
+let SBOM_ROWS = [];   // [{Image, Name, Version, PURL, Licenses}]
+
+/* ===== folder / file picking + DnD ===== */
+const drop = document.getElementById('drop');
+drop.addEventListener('dragover', e => { e.preventDefault(); drop.style.background='#fafafa'; });
+drop.addEventListener('dragleave', () => drop.style.background='');
+drop.addEventListener('drop', e => {
+  e.preventDefault(); drop.style.background='';
+  handleDrop(e.dataTransfer.items?.length ? e.dataTransfer.items : e.dataTransfer.files);
+});
+document.getElementById('pickdirBtn').onclick = ()=>document.getElementById('pickdir').click();
+document.getElementById('pickfilesBtn').onclick = ()=>document.getElementById('pickfiles').click();
+document.getElementById('pickdir').addEventListener('change', e => handleFiles(e.target.files));
+document.getElementById('pickfiles').addEventListener('change', e => handleFiles(e.target.files));
+
+async function handleDrop(itemsOrFiles){
+  const files = [];
+  if (itemsOrFiles[0] && 'webkitGetAsEntry' in itemsOrFiles[0]) {
+    const entries = [...itemsOrFiles].map(i => i.webkitGetAsEntry()).filter(Boolean);
+    for (const ent of entries) await traverseEntry(ent, '', files);
+  } else {
+    for (const f of [...itemsOrFiles]) files.push(f);
+  }
+  handleFiles(files);
+}
+function traverseEntry(entry, path, out){
+  return new Promise((resolve,reject)=>{
+    if (entry.isFile) {
+      entry.file(f => { f.webkitRelativePath = (path?path+'/':'') + f.name; out.push(f); resolve(); }, reject);
+    } else if (entry.isDirectory) {
+      const reader = entry.createReader();
+      reader.readEntries(async entries => {
+        for (const e of entries) await traverseEntry(e, (path?path+'/':'')+entry.name, out);
+        resolve();
+      }, reject);
+    } else resolve();
+  });
+}
+
+async function handleFiles(fileList){
+  const files = [...fileList].filter(f => f.name.endsWith('.json'));
+  if (!files.length) return;
+  ALL_ITEMS = await Promise.all(files.map(readJSONwithPath));
+  buildDataAndRender();
+}
+function readJSONwithPath(file){
+  return new Promise((res, rej)=>{
+    const r = new FileReader();
+    r.onload = () => {
+      try {
+        const json = JSON.parse(r.result);
+        const item = {file, name:file.name, path:file.webkitRelativePath||file.name, json};
+        addSbomRows(item.path, json); // harvest SBOMs early
+        res(item);
+      } catch(e){ rej(e); }
+    };
+    r.onerror = rej; r.readAsText(file);
+  });
+}
+
+/* ===== data transforms for VULNs ===== */
+function extractWeekFromPath(p){
+  const m = p.match(/trivy-reports-(\d{8})-(\d{6})/);
+  if (!m) return null;
+  const s = m[1]; return `${s.slice(0,4)}-${s.slice(4,6)}-${s.slice(6,8)}`;
+}
+function dateFromLastModified(file){
+  const d = new Date(file.lastModified);
+  const y=d.getFullYear(), m=String(d.getMonth()+1).padStart(2,'0'), da=String(d.getDate()).padStart(2,'0');
+  return `${y}-${m}-${da}`;
+}
+function countsFromJson(json){
+  const c = {CRITICAL:0,HIGH:0,MEDIUM:0,LOW:0,UNKNOWN:0};
+  (json.Results||[]).forEach(res=>{
+    if (res.Vulnerabilities) {
+      res.Vulnerabilities.forEach(v=>{
+        const s = (v.Severity || 'UNKNOWN').toUpperCase();
+        if (c[s] !== undefined) c[s] += 1;
+      });
+    }
+    // Some versions place vulns under packages
+    if (res.Packages) {
+      res.Packages.forEach(pkg=>{
+        (pkg.Vulnerabilities||[]).forEach(v=>{
+          const s = (v.Severity || 'UNKNOWN').toUpperCase();
+          if (c[s] !== undefined) c[s] += 1;
+        });
+      });
+    }
+  });
+  return c;
+}
+function sumCounts(list){
+  const s = {CRITICAL:0,HIGH:0,MEDIUM:0,LOW:0,UNKNOWN:0};
+  list.forEach(c=>sevOrder.forEach(k=>s[k]+=c[k]||0));
+  return s;
+}
+function _basename(p){ return String(p).split('/').pop(); }
+function _stripExt(n){ return n.replace(/\.(json|tar)$/i,''); }
+
+function imageName(json, fallback){
+  // 1) Prefer Trivy’s artifact name if it looks like a repo/tag
+  const art = json?.ArtifactName || '';
+  if (art && !/\.tar$/i.test(art) && !/\/trivy-archive-/i.test(art)) return art;
+
+  // 2) Try repo tag/digest from metadata
+  const meta = json?.Metadata || {};
+  if (Array.isArray(meta.Repotags) && meta.Repotags.length) return meta.Repotags[0];
+  if (Array.isArray(meta.RepoDigests) && meta.RepoDigests.length) return meta.RepoDigests[0];
+
+  // 3) Fallback: clean up the filename from the archive
+  const nameFromFile = _stripExt(_basename(fallback || art || ''));
+  return nameFromFile || 'unknown';
+}
+
+function rowsFromJson(j, image){
+  const out=[];
+  (j.Results||[]).forEach(res=>{
+    (res.Vulnerabilities||[]).forEach(v=>{
+      out.push({
+        Severity: (v.Severity||'UNKNOWN').toUpperCase(),
+        Image: image,
+        Pkg: v.PkgName || '',
+        Installed: v.InstalledVersion || '',
+        Fixed: v.FixedVersion || '',
+        CVE: v.VulnerabilityID || '',
+        Title: v.Title || v.Description || '',
+        URL: v.PrimaryURL || (v.References&&v.References[0]) || ''
+      });
+    });
+    (res.Packages||[]).forEach(pkg=>{
+      (pkg.Vulnerabilities||[]).forEach(v=>{
+        out.push({
+          Severity: (v.Severity||'UNKNOWN').toUpperCase(),
+          Image: image,
+          Pkg: pkg.Name || v.PkgName || '',
+          Installed: pkg.Version || v.InstalledVersion || '',
+          Fixed: v.FixedVersion || '',
+          CVE: v.VulnerabilityID || '',
+          Title: v.Title || v.Description || '',
+          URL: v.PrimaryURL || (v.References&&v.References[0]) || ''
+        });
+      });
+    });
+  });
+  return out;
+}
+function isVulnReport(obj){
+  if (!obj || typeof obj !== 'object') return false;
+  if (Array.isArray(obj.Results)) {
+    return obj.Results.some(r =>
+      (Array.isArray(r.Vulnerabilities) && r.Vulnerabilities.length) ||
+      (Array.isArray(r.Packages) && r.Packages.some(p => Array.isArray(p.Vulnerabilities) && p.Vulnerabilities.length))
+    );
+  }
+  return false;
+}
+
+/* ===== SBOM parsing ===== */
+function parseCycloneDX(json, image){
+  const comps = json?.components || [];
+  return comps.map(c => ({
+    Image: image,
+    Name: c.name || '',
+    Version: c.version || '',
+    PURL: c.purl || '',
+    Licenses: (c.licenses||[]).map(l => l.license?.id || l.license?.name || '').filter(Boolean).join(' | ')
+  }));
+}
+function parseSPDX(json, image){
+  const pkgs = json?.packages || [];
+  return pkgs.map(p => ({
+    Image: image,
+    Name: p.name || '',
+    Version: p.versionInfo || '',
+    PURL: (p.externalRefs||[]).find(r=>r.referenceType==='purl')?.referenceLocator || '',
+    Licenses: p.licenseDeclared || p.licenseConcluded || ''
+  }));
+}
+function addSbomRows(filePath, json){
+  const img = filePath.split('/').pop().replace(/\.json$/,'');
+  if (json && typeof json === 'object') {
+    if (typeof json.bomFormat === 'string' && json.bomFormat.toLowerCase() === 'cyclonedx') {
+      SBOM_ROWS.push(...parseCycloneDX(json, img));
+    } else if (json.spdxVersion) {
+      SBOM_ROWS.push(...parseSPDX(json, img));
+    }
+  }
+}
+
+/* ===== charts (no libs) ===== */
+function drawLineChart(canvas, labels, series){
+  const ctx = canvas.getContext("2d");
+  const w = canvas.width = canvas.clientWidth * devicePixelRatio;
+  const h = canvas.height = canvas.clientHeight * devicePixelRatio;
+  ctx.scale(devicePixelRatio, devicePixelRatio);
+  ctx.clearRect(0,0,w,h);
+  const m = {l:40,r:8,t:10,b:30};
+  const innerW = canvas.clientWidth - m.l - m.r;
+  const innerH = canvas.clientHeight - m.t - m.b;
+  const maxY = Math.max(1, ...series.flatMap(s=>s.values));
+  ctx.strokeStyle="#ccc"; ctx.lineWidth=1;
+  ctx.beginPath(); ctx.moveTo(m.l, m.t); ctx.lineTo(m.l, m.t+innerH); ctx.lineTo(m.l+innerW, m.t+innerH); ctx.stroke();
+  ctx.fillStyle="#666"; ctx.font="12px system-ui";
+  const steps=4; 
+  for(let i=0;i<=steps;i++){
+    const y=m.t+innerH-(i/steps)*innerH; const val=Math.round((i/steps)*maxY);
+    ctx.fillText(String(val), 4, y+4);
+    ctx.strokeStyle="#eee"; ctx.beginPath(); ctx.moveTo(m.l,y); ctx.lineTo(m.l+innerW,y); ctx.stroke();
+  }
+  labels.forEach((lb,i)=>{
+    const x=m.l+innerW*(labels.length<=1?0.5:i/(labels.length-1));
+    ctx.fillStyle="#666"; ctx.textAlign="center";
+    ctx.fillText(lb.slice(5), x, m.t+innerH+16);
+  });
+  series.forEach(s=>{
+    ctx.strokeStyle=s.color; ctx.lineWidth=2; ctx.beginPath();
+    s.values.forEach((v,i)=>{
+      const x=m.l+innerW*(labels.length<=1?0.5:i/(labels.length-1));
+      const y=m.t+innerH-(v/maxY)*innerH;
+      if(i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+    });
+    ctx.stroke();
+    s.values.forEach((v,i)=>{
+      const x=m.l+innerW*(labels.length<=1?0.5:i/(labels.length-1));
+      const y=m.t+innerH-(v/maxY)*innerH;
+      ctx.beginPath(); ctx.arc(x,y,3,0,Math.PI*2); ctx.fillStyle=s.color; ctx.fill();
+    });
+  });
+}
+function drawStackedBarChart(canvas, labels, series){
+  const ctx = canvas.getContext("2d");
+  const w = canvas.width = canvas.clientWidth * devicePixelRatio;
+  const h = canvas.height = canvas.clientHeight * devicePixelRatio;
+  ctx.scale(devicePixelRatio, devicePixelRatio);
+  ctx.clearRect(0,0,w,h);
+  const m = {l:40,r:8,t:10,b:90};
+  const innerW = canvas.clientWidth - m.l - m.r;
+  const innerH = canvas.clientHeight - m.t - m.b;
+  const totals = labels.map((_,i)=>series.reduce((s,ser)=>s+(ser.values[i]||0),0));
+  const maxY = Math.max(1, ...totals);
+  ctx.strokeStyle="#ccc"; ctx.lineWidth=1;
+  ctx.beginPath(); ctx.moveTo(m.l,m.t); ctx.lineTo(m.l,m.t+innerH); ctx.lineTo(m.l+innerW,m.t+innerH); ctx.stroke();
+  ctx.fillStyle="#666"; ctx.font="12px system-ui";
+  const steps=4; 
+  for(let i=0;i<=steps;i++){
+    const y=m.t+innerH-(i/steps)*innerH; const val=Math.round((i/steps)*maxY);
+    ctx.fillText(String(val), 4, y+4);
+    ctx.strokeStyle="#eee"; ctx.beginPath(); ctx.moveTo(m.l,y); ctx.lineTo(m.l+innerW,y); ctx.stroke();
+  }
+  const slotW = innerW/(labels.length||1), bw = Math.max(8, slotW*0.6);
+  labels.forEach((lb,i)=>{
+    const x = m.l + (i+0.5)*slotW - bw/2;
+    let baseY = m.t + innerH;
+    series.forEach(ser=>{
+      const v = ser.values[i]||0;
+      const h = (v/maxY)*innerH;
+      const y = baseY - h;
+      ctx.fillStyle = ser.color; ctx.fillRect(x, y, bw, h);
+      baseY = y;
+    });
+    ctx.save(); ctx.translate(x+bw/2, m.t+innerH+10); ctx.rotate(-Math.PI/4);
+    ctx.textAlign="right"; ctx.fillStyle="#666"; ctx.fillText(lb, 0, 0); ctx.restore();
+  });
+}
+
+/* ===== build + render (latest by default) ===== */
+function buildDataAndRender(){
+  const map = new Map();
+  for (const it of ALL_ITEMS) {
+    const wk = extractWeekFromPath(it.path) || dateFromLastModified(it.file);
+    if (!map.has(wk)) map.set(wk, {date:wk, items:[]});
+    map.get(wk).items.push({file:it.name, path:it.path, json:it.json});
+  }
+  WEEKS = [...map.values()].sort((a,b)=>a.date.localeCompare(b.date));
+
+  // Weekly aggregation considers only real vuln reports
+  WEEKLY_AGG = WEEKS.map(w=>{
+    const vulnItems = w.items.filter(x => isVulnReport(x.json));
+    return { date: w.date, counts: sumCounts(vulnItems.map(x => countsFromJson(x.json))) };
+  });
+
+  LATEST = WEEKS[WEEKS.length-1];
+  const latestVulnItems = (LATEST?.items || []).filter(x => isVulnReport(x.json));
+
+  // Per-image table = latest only
+  PER_IMAGE = latestVulnItems.map(it=>{
+    const c = countsFromJson(it.json);
+    return {
+      image: imageName(it.json, it.file),
+      ...c,
+      total: sevOrder.reduce((s,k)=>s+(c[k]||0),0)
+    };
+  }).sort((a,b)=>b.CRITICAL-a.CRITICAL || b.HIGH-a.HIGH || b.MEDIUM-a.MEDIUM || b.LOW-a.LOW);
+
+  // Viewer rows = latest by default (can be switched to all weeks)
+  const allWeeks = document.getElementById('allweeks')?.checked;
+  const srcItems = allWeeks
+    ? WEEKS.flatMap(w => w.items).filter(x => isVulnReport(x.json))
+    : latestVulnItems;
+
+  VUL_ROWS = [];
+  for (const it of srcItems) {
+    const img = imageName(it.json, it.name);
+    VUL_ROWS.push(...rowsFromJson(it.json, img));
+  }
+
+  renderWeekly();
+  wireViewerOnce(); renderViewer();
+  wireSbomOnce(); renderSbomTable();
+
+  // CSV buttons
+  const weeklyBtn = document.getElementById('dl-weekly');
+  const latestBtn  = document.getElementById('dl-latest');
+  weeklyBtn.disabled = WEEKS.length===0;
+  latestBtn.disabled = PER_IMAGE.length===0;
+  weeklyBtn.onclick = ()=>downloadCSV('weekly_summary.csv',
+    WEEKLY_AGG.map(w=>({week:w.date, CRITICAL:w.counts.CRITICAL, HIGH:w.counts.HIGH, MEDIUM:w.counts.MEDIUM, LOW:w.counts.LOW, UNKNOWN:w.counts.UNKNOWN,
+                         total: sevOrder.reduce((s,k)=>s+(w.counts[k]||0),0)})));
+  latestBtn.onclick = ()=>downloadCSV('latest_week_per_image.csv',
+    PER_IMAGE.map(r=>({image:r.image, CRITICAL:r.CRITICAL,HIGH:r.HIGH,MEDIUM:r.MEDIUM,LOW:r.LOW,UNKNOWN:r.UNKNOWN,total:r.total})));
+}
+
+function renderWeekly(){
+  // Trend
+  const labels = WEEKLY_AGG.map(w=>w.date);
+  const series = sevOrder.map(k=>({name:k, color:sevColor[k], values:WEEKLY_AGG.map(w=>w.counts[k]||0)}));
+  drawLineChart(document.getElementById('trend'), labels, series);
+  document.getElementById('trend-note').textContent =
+    WEEKS.length ? `Weeks: ${labels[0]} → ${labels[labels.length-1]}  •  Folders: ${WEEKS.length}` : 'No data';
+
+  // Latest stacked bars
+  const barLabels = PER_IMAGE.map(r=>r.image);
+  const barSeries = [
+    {name:'CRITICAL', color:sevColor.CRITICAL, values: PER_IMAGE.map(r=>r.CRITICAL)},
+    {name:'HIGH',     color:sevColor.HIGH,     values: PER_IMAGE.map(r=>r.HIGH)},
+    {name:'MEDIUM',   color:sevColor.MEDIUM,   values: PER_IMAGE.map(r=>r.MEDIUM)},
+    {name:'LOW',      color:sevColor.LOW,      values: PER_IMAGE.map(r=>r.LOW)},
+    {name:'UNKNOWN',  color:sevColor.UNKNOWN,  values: PER_IMAGE.map(r=>r.UNKNOWN)},
+  ];
+  drawStackedBarChart(document.getElementById('bars'), barLabels, barSeries);
+  const latestDate = LATEST ? LATEST.date : '—';
+  document.getElementById('bars-note').textContent =
+    LATEST ? `Latest week: ${latestDate} • ${PER_IMAGE.length} images` : 'No latest week found';
+  document.getElementById('latest-week-label').textContent =
+    LATEST ? `Folder date used here: ${latestDate}` : '';
+  // Latest table
+  const tbody = document.getElementById('latest-tbody');
+  tbody.innerHTML = PER_IMAGE.map(r=>`
+    <tr>
+      <td>${escapeHtml(r.image)}</td>
+      <td><span class="badge CRITICAL">${r.CRITICAL}</span></td>
+      <td><span class="badge HIGH">${r.HIGH}</span></td>
+      <td><span class="badge MEDIUM">${r.MEDIUM}</span></td>
+      <td><span class="badge LOW">${r.LOW}</span></td>
+      <td><span class="badge UNKNOWN">${r.UNKNOWN}</span></td>
+      <td>${r.total}</td>
+    </tr>
+  `).join('');
+}
+
+/* ===== vulnerabilities viewer ===== */
+let viewerWired = false, sortKey='Severity', sortDir='asc';
+function wireViewerOnce(){
+  if (viewerWired) return; viewerWired = true;
+  document.querySelectorAll('.sev').forEach(cb=>cb.onchange = renderViewer);
+  document.getElementById('fixonly').onchange = renderViewer;
+  document.getElementById('q').oninput = renderViewer;
+  const aw = document.getElementById('allweeks');
+  if (aw) aw.onchange = ()=>{ buildDataAndRender(); };
+  document.querySelectorAll('#grid thead th').forEach(th=>{
+    th.onclick = ()=>{ const k=th.dataset.k; if(!k) return; sortKey===k ? sortDir=(sortDir==='asc'?'desc':'asc') : (sortKey=k, sortDir='asc'); renderViewer(); };
+  });
+  document.getElementById('dl-vuls').onclick = ()=>downloadCSV('vulnerabilities_filtered.csv', CURRENT_ROWS);
+}
+function renderViewer(){
+  const sevOn = new Set([...document.querySelectorAll('.sev')].filter(cb=>cb.checked).map(cb=>cb.value));
+  const fixOnly = document.getElementById('fixonly').checked;
+  const q = (document.getElementById('q').value||'').trim().toLowerCase();
+  const aw = document.getElementById('allweeks')?.checked;
+
+  document.getElementById('scope-note').textContent =
+    aw ? 'Viewer scope: ALL loaded folders (aggregated).' :
+         'Viewer scope: Latest folder only (matches the table above).';
+
+  CURRENT_ROWS = VUL_ROWS.filter(r=>{
+    if (!sevOn.has(r.Severity)) return false;
+    if (fixOnly && !r.Fixed) return false;
+    if (!q) return true;
+    const hay = `${r.CVE} ${r.Pkg} ${r.Image} ${r.Title}`.toLowerCase();
+    return hay.includes(q);
+  });
+
+  const counts = {CRITICAL:0,HIGH:0,MEDIUM:0,LOW:0,UNKNOWN:0};
+  CURRENT_ROWS.forEach(r=>counts[r.Severity]=(counts[r.Severity]||0)+1);
+  document.getElementById('counts').textContent =
+    `Showing ${CURRENT_ROWS.length} • ` +
+    `CRITICAL ${counts.CRITICAL||0} • HIGH ${counts.HIGH||0} • MEDIUM ${counts.MEDIUM||0} • LOW ${counts.LOW||0} • UNK ${counts.UNKNOWN||0}`;
+  document.getElementById('dl-vuls').disabled = CURRENT_ROWS.length===0;
+
+  const sevRank = s => ({CRITICAL:0,HIGH:1,MEDIUM:2,LOW:3,UNKNOWN:4})[s] ?? 5;
+  const dir = sortDir==='asc'?1:-1;
+  CURRENT_ROWS.sort((a,b)=>{
+    let va=a[sortKey]||'', vb=b[sortKey]||'';
+    if (sortKey==='Severity') return (sevRank(va)-sevRank(vb))*dir;
+    return (''+va).localeCompare(''+vb, undefined, {numeric:true})*dir;
+  });
+
+  const tbody = document.querySelector('#grid tbody');
+  tbody.innerHTML = CURRENT_ROWS.map(r=>`
+    <tr>
+      <td><span class="badge ${r.Severity}">${r.Severity}</span></td>
+      <td>${escapeHtml(r.Image)}</td>
+      <td>${escapeHtml(r.Pkg)}</td>
+      <td>${escapeHtml(r.Installed)}</td>
+      <td>${r.Fixed ? `<strong>${escapeHtml(r.Fixed)}</strong>` : '<span class="muted">n/a</span>'}</td>
+      <td>${escapeHtml(r.CVE)}</td>
+      <td>${r.URL ? `<a href="${escapeHtml(r.URL)}" target="_blank" rel="noreferrer">${escapeHtml(r.Title || r.URL)}</a>` : escapeHtml(r.Title)}</td>
+    </tr>
+  `).join('');
+}
+
+/* ===== SBOM viewer ===== */
+function wireSbomOnce(){
+  const q = document.getElementById('sbom-q');
+  if (q && !q._wired){ q._wired = true; q.oninput = renderSbomTable; }
+  const btn = document.getElementById('dl-sbom');
+  if (btn && !btn._wired){
+    btn._wired = true;
+    btn.onclick = ()=> downloadCSV('sbom_inventory.csv', SBOM_ROWS);
+  }
+}
+function renderSbomTable(){
+  const tbody = document.getElementById('sbom-tbody');
+  if (!tbody) return;
+  const q = (document.getElementById('sbom-q').value||'').toLowerCase();
+  const rows = SBOM_ROWS.filter(r => `${r.Image} ${r.Name} ${r.Version} ${r.PURL} ${r.Licenses}`.toLowerCase().includes(q));
+  document.getElementById('dl-sbom').disabled = rows.length===0;
+  tbody.innerHTML = rows.map(r => `
+    <tr>
+      <td>${escapeHtml(r.Image)}</td>
+      <td>${escapeHtml(r.Name)}</td>
+      <td>${escapeHtml(r.Version)}</td>
+      <td>${escapeHtml(r.PURL)}</td>
+      <td>${escapeHtml(r.Licenses)}</td>
+    </tr>
+  `).join('');
+}
+
+/* ===== Server reports browser (parses Apache autoindex HTML) ===== */
+const serverRoot = "/reports/";
+
+document.getElementById('refreshServerBtn').onclick = refreshServerList;
+refreshServerList();  // auto-load on page open
+
+async function refreshServerList(){
+  setServerStatus('Loading…');
+  try {
+    const hosts = await listFolders(serverRoot); // e.g. ["myhost/"]
+    const container = document.getElementById('serverList');
+    if (!hosts.length) {
+      container.innerHTML = '<div class="muted">No hosts found under /reports.</div>';
+      setServerStatus('');
+      return;
+    }
+    let html = '';
+    for (const host of hosts){
+      const hostPath = serverRoot + host;
+      const sub = await listFolders(hostPath); // trivy-reports-*/ , sboms-*/
+      const weeks = sub.filter(s => /^trivy-reports-\d{8}-\d{6}\/$/.test(s)).sort();
+      const sboms = sub.filter(s => /^sboms-\d{8}-\d{6}\/$/.test(s)).sort();
+
+      html += `<div class="folder">
+        <h4>${escapeHtml(host.replace(/\/$/,''))}</h4>
+        <div><strong>Weeks:</strong> ${
+          weeks.length ? weeks.map(w => `<a class="tag" data-path="${hostPath + w}" href="javascript:void(0)">${w.replace(/\/$/,'')}</a>`).join(' ')
+                       : '<span class="muted">none</span>'
+        }</div>
+        <div style="margin-top:4px"><strong>SBOMs:</strong> ${
+          sboms.length ? sboms.map(w => `<a class="tag" data-path="${hostPath + w}" href="javascript:void(0)">${w.replace(/\/$/,'')}</a>`).join(' ')
+                        : '<span class="muted">none</span>'
+        }</div>
+      </div>`;
+    }
+    document.getElementById('serverList').innerHTML = html;
+
+    // click handlers -> load that server folder into dashboard
+    document.querySelectorAll('#serverList a.tag').forEach(a=>{
+      a.onclick = ()=> loadServerFolder(a.dataset.path);
+    });
+    setServerStatus(`Found ${hosts.length} host(s).`);
+  } catch(e){
+    console.error(e);
+    document.getElementById('serverList').innerHTML = '<div class="muted">Failed to list /reports. Check that the volume is mounted and autoindex is enabled.</div>';
+    setServerStatus('Failed to load.');
+  }
+}
+
+function setServerStatus(msg){ document.getElementById('serverStatus').textContent = msg||''; }
+
+async function listFolders(path){
+  // Fetch autoindex HTML and parse <a href="subdir/">
+  const res = await fetch(path, {cache:'no-store'});
+  if (!res.ok) return [];
+  const text = await res.text();
+  const doc = new DOMParser().parseFromString(text, 'text/html');
+  const links = [...doc.querySelectorAll('a')].map(a => a.getAttribute('href')||'');
+  // Keep only subdirectories (end with '/'), skip parent '../'
+  return links.filter(h => h.endsWith('/') && h !== '../');
+}
+
+async function listJsonFiles(path){
+  const res = await fetch(path, {cache:'no-store'});
+  if (!res.ok) return [];
+  const text = await res.text();
+  const doc = new DOMParser().parseFromString(text, 'text/html');
+  const hrefs = [...doc.querySelectorAll('a')].map(a => a.getAttribute('href')||'');
+  return hrefs.filter(h => h.toLowerCase().endsWith('.json'));
+}
+
+async function loadServerFolder(path){
+  try{
+    setServerStatus(`Loading ${path} …`);
+    const jsonFiles = await listJsonFiles(path);
+    if (!jsonFiles.length){
+      setServerStatus('No JSON files found in folder.');
+      return;
+    }
+    // Fetch and convert into the same ALL_ITEMS shape your dashboard expects
+    const items = [];
+    for (const name of jsonFiles){
+      const url = path + name;
+      try{
+        const res = await fetch(url, {cache:'no-store'});
+        const json = await res.json();
+        items.push({
+          file: { name, lastModified: Date.now() },   // synthetic
+          name, path: url.replace(location.origin, ''), json
+        });
+      } catch(e){ console.warn('Failed to load', url, e); }
+    }
+    if (!items.length){ setServerStatus('No valid JSON files parsed.'); return; }
+
+    // Replace ALL_ITEMS and rebuild UI
+    ALL_ITEMS = items;
+    buildDataAndRender();
+
+    // indicate source
+    const note = document.getElementById('trend-note');
+    if (note) note.textContent = `Loaded from ${path} • Weeks across loaded set: ` +
+      (WEEKS.length ? `${WEEKS[0].date} → ${WEEKS[WEEKS.length-1].date}` : 'n/a');
+    setServerStatus(`Loaded ${items.length} JSON file(s) from ${path}`);
+  } catch(e){
+    console.error(e);
+    setServerStatus('Load failed.');
+  }
+}
+
+/* ===== utilities ===== */
+function downloadCSV(filename, rows){
+  if (!rows.length) return;
+  const esc = s => `"${String(s).replace(/"/g,'""')}"`;
+  const header = Object.keys(rows[0]);
+  const csv = [header.join(","), ...rows.map(r=>header.map(k=>esc(r[k]??"")).join(","))].join("\n");
+  const a = Object.assign(document.createElement('a'), {href:URL.createObjectURL(new Blob([csv],{type:"text/csv"})), download:filename});
+  a.click();
+}
+function escapeHtml(s){ return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+</script>
+</body>
+</html>
