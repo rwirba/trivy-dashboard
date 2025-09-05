@@ -8,8 +8,8 @@ RUN useradd -u 10001 nobody && \
     chown -R nobody:nobody /var/www/html /data/reports
 
 # app files
-COPY --chown=web:web dashboard.html /var/www/html/
-COPY --chown=web:web assets/ /var/www/html/assets/
+COPY --chown=nobody:nobody dashboard.html /var/www/html/
+COPY --chown=nobody:nobody assets/ /var/www/html/assets/
 
 # minimalist httpd config (port 8080 + autoindex under /reports)
 RUN printf '%s\n' \
